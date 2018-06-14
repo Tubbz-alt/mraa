@@ -82,6 +82,7 @@ mraa_init_json_platform_platform(json_object* jobj_platform, mraa_board_t* board
     const char* temp_string = NULL;
     int length = 0;
     mraa_result_t ret = MRAA_SUCCESS;
+    int i;
 
     // Set the platform name
     if (json_object_object_get_ex(jobj_platform, NAME_KEY, &jobj_temp)) {
@@ -94,8 +95,8 @@ mraa_init_json_platform_platform(json_object* jobj_platform, mraa_board_t* board
             syslog(LOG_ERR, "init_json_platform: Empty string provided for \"%s\" key in platform", NAME_KEY);
             return MRAA_ERROR_NO_DATA_AVAILABLE;
         }
-        board->platform_name = (char*) calloc(length, sizeof(char));
-        strncpy(board->platform_name, temp_string, length);
+        board->platform_name = (char*) calloc(length + 1, sizeof(char));
+        strncpy(board->platform_name, temp_string, length + 1);
     } else {
         syslog(LOG_ERR, "init_json_platform: No \"%s\" key in platform", NAME_KEY);
         return MRAA_ERROR_NO_DATA_AVAILABLE;
@@ -138,22 +139,27 @@ mraa_init_json_platform_platform(json_object* jobj_platform, mraa_board_t* board
 
     // Check to see if they've provided a UART count
     ret = mraa_init_json_platform_get_index(jobj_platform, PLATFORM_KEY, UART_COUNT_KEY, index,
-                                            &(board->uart_dev_count), 6);
+                                            &(board->uart_dev_count), MAX_UART_COUNT);
     if (ret != MRAA_SUCCESS && ret != MRAA_ERROR_NO_DATA_AVAILABLE) {
         return ret;
     }
     // Check to see if they've provided a I2C count
     ret = mraa_init_json_platform_get_index(jobj_platform, PLATFORM_KEY, I2C_COUNT_KEY, index,
-                                            &(board->i2c_bus_count), 12);
+                                            &(board->i2c_bus_count), MAX_I2C_BUS_COUNT);
     if (ret != MRAA_SUCCESS && ret != MRAA_ERROR_NO_DATA_AVAILABLE) {
         return ret;
     }
+    for (i = 0; i < board->i2c_bus_count; ++i)
+        board->i2c_bus[i].bus_id = -1;
+
     // Check to see if they've provided a SPI count
     ret = mraa_init_json_platform_get_index(jobj_platform, PLATFORM_KEY, SPI_COUNT_KEY, index,
-                                            &(board->spi_bus_count), 12);
+                                            &(board->spi_bus_count), MAX_SPI_BUS_COUNT);
     if (ret != MRAA_SUCCESS && ret != MRAA_ERROR_NO_DATA_AVAILABLE) {
         return ret;
     }
+    for (i = 0; i < board->spi_bus_count; ++i)
+        board->spi_bus[i].bus_id = -1;
 
     // Set the PWM default numbers
     board->pwm_default_period = -1;
@@ -208,7 +214,8 @@ mraa_init_json_platform_io(json_object* jobj_io, mraa_board_t* board, int index)
         }
         temp_string = json_object_get_string(jobj_temp);
         // set the gpio label
-        strncpy(board->pins[pos].name, temp_string, 8);
+        memset(board->pins[pos].name, 0, MRAA_PIN_NAME_SIZE);
+        strncpy(board->pins[pos].name, temp_string, MRAA_PIN_NAME_SIZE - 1);
     } else {
         syslog(LOG_ERR, "init_json_platform: No IO Label");
         return MRAA_ERROR_INVALID_RESOURCE;
@@ -278,20 +285,22 @@ mraa_init_json_platform_i2c(json_object* jobj_i2c, mraa_board_t* board, int inde
 {
     int pos = 0;
     int pin = 0;
-    int sysfs_pin = 0;
+    int bus = 0;
+    // int sysfs_pin = 0;
     mraa_result_t ret = MRAA_SUCCESS;
     json_object* jobj_temp = NULL;
+
+    // Default to no mux pins defined
+    board->pins[pin].i2c.mux_total = 0;
 
     // Get the I2C bus array index
     ret = mraa_init_json_platform_get_index(jobj_i2c, I2C_KEY, INDEX_KEY, index, &pos, board->i2c_bus_count - 1);
     if (ret != MRAA_SUCCESS) {
         return ret;
     }
-    // Get the sysfs pin
-    ret = mraa_init_json_platform_get_pin(jobj_i2c, I2C_KEY, RAW_PIN_KEY, index, &sysfs_pin);
-    if (ret != MRAA_SUCCESS) {
-        return ret;
-    }
+    // Get the bus number (e.g. 2 for /dev/i2c-2). If it doesn't exist, default to bus = pos
+    bus = pos;
+    mraa_init_json_platform_get_pin(jobj_i2c, I2C_KEY, BUS_KEY, index, &bus);
     // Setup the sda pin
     ret = mraa_init_json_platform_get_index(jobj_i2c, I2C_KEY, SDAPIN_KEY, index, &pin,
                                             board->phy_pin_count - 1);
@@ -299,7 +308,6 @@ mraa_init_json_platform_i2c(json_object* jobj_i2c, mraa_board_t* board, int inde
         board->i2c_bus[pos].sda = -1;
     } else if (ret == MRAA_SUCCESS) {
         board->pins[pin].capabilities.i2c = 1;
-        board->pins[pin].i2c.pinmap = sysfs_pin;
         board->i2c_bus[pos].sda = pin;
     } else {
         return ret;
@@ -311,13 +319,12 @@ mraa_init_json_platform_i2c(json_object* jobj_i2c, mraa_board_t* board, int inde
         board->i2c_bus[pos].scl = -1;
     } else if (ret == MRAA_SUCCESS) {
         board->pins[pin].capabilities.i2c = 1;
-        board->pins[pin].i2c.pinmap = sysfs_pin;
         board->i2c_bus[pos].scl = pin;
     } else {
         return ret;
     }
 
-    board->i2c_bus[pos].bus_id = pos;
+    board->i2c_bus[pos].bus_id = bus;
 
     // check to see if this i2c is the default one
     if (json_object_object_get_ex(jobj_i2c, DEFAULT_KEY, &jobj_temp)) {
@@ -366,8 +373,9 @@ mraa_result_t
 mraa_init_json_platform_spi(json_object* jobj_spi, mraa_board_t* board, int index)
 {
     int pos = 0;
+    int bus = 0;
+    int ss = 0;
     int pin = 0;
-    int parent_id = 0;
     json_object* jobj_temp = NULL;
     mraa_result_t ret = MRAA_SUCCESS;
 
@@ -377,11 +385,20 @@ mraa_init_json_platform_spi(json_object* jobj_spi, mraa_board_t* board, int inde
         return ret;
     }
 
-    // Get the parent id
-    ret = mraa_init_json_platform_get_pin(jobj_spi, SPI_KEY, CHIP_ID_KEY, index, &parent_id);
+    // Get the bus
+    ret = mraa_init_json_platform_get_pin(jobj_spi, SPI_KEY, BUS_KEY, index, &bus);
     if (ret != MRAA_SUCCESS) {
         return ret;
     }
+
+    // Get slave select
+    ret = mraa_init_json_platform_get_pin(jobj_spi, SPI_KEY, SS_KEY, index, &ss);
+    if (ret != MRAA_SUCCESS) {
+        return ret;
+    }
+
+    board->spi_bus[pos].bus_id = bus;
+    board->spi_bus[pos].slave_s = ss;
 
     // Setup the clock pin
     ret = mraa_init_json_platform_get_index(jobj_spi, SPI_KEY, CLOCK_KEY, index, &pin, board->phy_pin_count - 1);
@@ -389,7 +406,6 @@ mraa_init_json_platform_spi(json_object* jobj_spi, mraa_board_t* board, int inde
         board->spi_bus[pos].sclk = -1;
     } else if (ret == MRAA_SUCCESS) {
         board->pins[pin].capabilities.spi = 1;
-        board->pins[pin].spi.parent_id = parent_id;
         board->spi_bus[pos].sclk = pin;
     } else {
         return ret;
@@ -400,7 +416,6 @@ mraa_init_json_platform_spi(json_object* jobj_spi, mraa_board_t* board, int inde
         board->spi_bus[pos].miso = -1;
     } else if (ret == MRAA_SUCCESS) {
         board->pins[pin].capabilities.spi = 1;
-        board->pins[pin].spi.parent_id = parent_id;
         board->spi_bus[pos].miso = pin;
     } else {
         return ret;
@@ -411,7 +426,6 @@ mraa_init_json_platform_spi(json_object* jobj_spi, mraa_board_t* board, int inde
         board->spi_bus[pos].mosi = -1;
     } else if (ret == MRAA_SUCCESS) {
         board->pins[pin].capabilities.spi = 1;
-        board->pins[pin].spi.parent_id = parent_id;
         board->spi_bus[pos].mosi = pin;
     } else {
         return ret;
@@ -422,7 +436,6 @@ mraa_init_json_platform_spi(json_object* jobj_spi, mraa_board_t* board, int inde
         board->spi_bus[pos].cs = -1;
     } else if (ret == MRAA_SUCCESS) {
         board->pins[pin].capabilities.spi = 1;
-        board->pins[pin].spi.parent_id = parent_id;
         board->spi_bus[pos].cs = pin;
     } else {
         return ret;
@@ -509,8 +522,8 @@ mraa_init_json_platform_uart(json_object* jobj_uart, mraa_board_t* board, int in
             syslog(LOG_ERR, "init_json_platform: UART Path at index: %d was empty", index);
             return MRAA_ERROR_NO_DATA_AVAILABLE;
         }
-        board->uart_dev[pos].device_path = (char*) calloc(length, sizeof(char));
-        strncpy(board->uart_dev[pos].device_path, temp_string, length);
+        board->uart_dev[pos].device_path = (char*) calloc(length + 1, sizeof(char));
+        strncpy(board->uart_dev[pos].device_path, temp_string, length + 1);
     } else {
         syslog(LOG_ERR, "init_json_platform: UART config at index: %d needs a path", index);
         return MRAA_ERROR_NO_DATA_AVAILABLE;
@@ -696,7 +709,16 @@ mraa_init_json_platform(const char* platform_json)
     free(plat);
     // Set the new one in it's place
     plat = board;
-    platform_name = plat->platform_name;
+
+    // This one was allocated and assigned an "Unknown platform" value by now,
+    // so we need to reallocate it.
+    free(platform_name);
+    platform_name = calloc(strlen(plat->platform_name) + 1, sizeof(char));
+    if (platform_name == NULL) {
+        syslog(LOG_ERR, "init_json_platform: Could not allocate memory for platform_name");
+        goto unsuccessful;
+    }
+    strncpy(platform_name, plat->platform_name, strlen(plat->platform_name) + 1);
 
     // We made it to the end without anything going wrong, just cleanup
     ret = MRAA_SUCCESS;

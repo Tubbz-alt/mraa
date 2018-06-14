@@ -29,7 +29,9 @@
 #define __USE_LINUX_IOCTL_DEFS
 #endif
 #include <sys/ioctl.h>
-#if defined(MSYS)
+#if defined(PERIPHERALMAN)
+#include "linux/spi_kernel_headers.h"
+#elif defined(MSYS)
 // There's no spidev.h on MSYS, so we need to provide our own,
 // and only *after* including ioctl.h as that one contains prerequisites.
 #include "linux/spi_kernel_headers.h"
@@ -39,6 +41,7 @@
 #include <stdio.h>
 #include <fcntl.h>
 #include <unistd.h>
+#include <errno.h>
 
 #include "spi.h"
 #include "mraa_internal.h"
@@ -80,7 +83,7 @@ mraa_spi_init(int bus)
         syslog(LOG_ERR, "spi: requested bus above spi bus count");
         return NULL;
     }
-    if (plat->adv_func->spi_init_pre != NULL) {
+    if (plat->adv_func != NULL && plat->adv_func->spi_init_pre != NULL) {
         if (plat->adv_func->spi_init_pre(bus) != MRAA_SUCCESS) {
             return NULL;
         }
@@ -88,7 +91,7 @@ mraa_spi_init(int bus)
 
     if (!plat->no_bus_mux) {
         int pos = plat->spi_bus[bus].sclk;
-        if (plat->pins[pos].spi.mux_total > 0) {
+        if (pos >= 0 && plat->pins[pos].spi.mux_total > 0) {
             if (mraa_setup_mux_mapped(plat->pins[pos].spi) != MRAA_SUCCESS) {
                 syslog(LOG_ERR, "spi: failed to set-up spi sclk multiplexer");
                 return NULL;
@@ -96,7 +99,7 @@ mraa_spi_init(int bus)
         }
 
         pos = plat->spi_bus[bus].mosi;
-        if (plat->pins[pos].spi.mux_total > 0) {
+        if (pos >= 0 && plat->pins[pos].spi.mux_total > 0) {
             if (mraa_setup_mux_mapped(plat->pins[pos].spi) != MRAA_SUCCESS) {
                 syslog(LOG_ERR, "spi: failed to set-up spi mosi multiplexer");
                 return NULL;
@@ -104,7 +107,7 @@ mraa_spi_init(int bus)
         }
 
         pos = plat->spi_bus[bus].miso;
-        if (plat->pins[pos].spi.mux_total > 0) {
+        if (pos >= 0 && plat->pins[pos].spi.mux_total > 0) {
             if (mraa_setup_mux_mapped(plat->pins[pos].spi) != MRAA_SUCCESS) {
                 syslog(LOG_ERR, "spi: failed to set-up spi miso multiplexer");
                 return NULL;
@@ -112,7 +115,7 @@ mraa_spi_init(int bus)
         }
 
         pos = plat->spi_bus[bus].cs;
-        if (plat->pins[pos].spi.mux_total > 0) {
+        if (pos >= 0 && plat->pins[pos].spi.mux_total > 0) {
             if (mraa_setup_mux_mapped(plat->pins[pos].spi) != MRAA_SUCCESS) {
                 syslog(LOG_ERR, "spi: failed to set-up spi cs multiplexer");
                 return NULL;
@@ -121,7 +124,7 @@ mraa_spi_init(int bus)
     }
     mraa_spi_context dev = mraa_spi_init_raw(plat->spi_bus[bus].bus_id, plat->spi_bus[bus].slave_s);
 
-    if (plat->adv_func->spi_init_post != NULL) {
+    if (plat->adv_func != NULL && plat->adv_func->spi_init_post != NULL) {
         mraa_result_t ret = plat->adv_func->spi_init_post(dev);
         if (ret != MRAA_SUCCESS) {
             free(dev);
@@ -154,11 +157,11 @@ mraa_spi_init_raw(unsigned int bus, unsigned int cs)
     }
 
     char path[MAX_SIZE];
-    sprintf(path, "/dev/spidev%u.%u", bus, cs);
+    snprintf(path, MAX_SIZE, "/dev/spidev%u.%u", bus, cs);
 
     dev->devfd = open(path, O_RDWR);
     if (dev->devfd < 0) {
-        syslog(LOG_ERR, "spi: Failed opening SPI Device. bus:%s", path);
+        syslog(LOG_ERR, "spi: Failed opening SPI Device. bus:%s. Error %d %s", path, errno, strerror(errno));
         status = MRAA_ERROR_INVALID_RESOURCE;
         goto init_raw_cleanup;
     }
@@ -253,9 +256,12 @@ mraa_spi_frequency(mraa_spi_context dev, int hz)
     int speed = 0;
     dev->clock = hz;
     if (ioctl(dev->devfd, SPI_IOC_RD_MAX_SPEED_HZ, &speed) != -1) {
-        if (speed < hz) {
-            dev->clock = speed;
-            syslog(LOG_WARNING, "spi: Selected speed reduced to max allowed speed");
+	if (speed < hz) {
+            // We wanted to never go higher than SPI_IOC_RD_MAX_SPEED_HZ but it
+            // seems a bunch of drivers don't have this set to the actual max
+            // so we only complain about it
+            // dev->clock = speed;
+            syslog(LOG_NOTICE, "spi: Selected speed (%d Hz) is higher than the kernel max allowed speed (%lu Hz)", hz, SPI_IOC_RD_MAX_SPEED_HZ);
         }
     }
     return MRAA_SUCCESS;

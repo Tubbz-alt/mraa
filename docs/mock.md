@@ -23,8 +23,11 @@ registers or 5 single-word ones or a mix thereof.
 data items (words or bytes) are calculated from the sent ones using
 `sent_byte (or word) XOR constant` formula.
 See [SPI mock header](../include/mock/mock_board_spi.h#L38-L39) for constant values.
+* Single UART port. All functions are supported, but many are simple stubs. Write
+always succeeds, read returns 'Z' symbol as many times as `read()` requested.
 
-We plan to develop it further and all [contributions](../CONTRIBUTING.md) are more than welcome.
+We plan to develop it further and all contributions are more than welcome. See our
+@ref contributing page for more information.
 
 See the table below for pin layout and features
 
@@ -38,12 +41,14 @@ See the table below for pin layout and features
 | 5           | SPI0MOSI | MOSI pin for SPI0 bus                 |
 | 6           | SPI0MISO | MISO pin for SPI0 bus                 |
 | 7           | SPI0SCLK | SCLK pin for SPI0 bus                 |
+| 8           | UART0RX  | RX pin for UART0 port                 |
+| 9           | UART0TX  | TX pin for UART0 port                 |
 
 Building
 --------
 
 Generally all the building steps are the same as listed
-in the [main building guide](./building.md), you just need to set some specific
+in the main @ref building guide, you just need to set some specific
 CMake options.
 
 ### Linux

@@ -84,6 +84,7 @@ mraa_result_t
 mraa_firmata_close(mraa_firmata_context dev)
 {
     mraa_firmata_response_stop(dev);
+    pthread_spin_destroy(&firmata_dev->lock);
     free(dev);
     return MRAA_SUCCESS;
 }
@@ -92,10 +93,10 @@ static mraa_result_t
 mraa_firmata_i2c_init_bus_replace(mraa_i2c_context dev)
 {
     int delay = 1; // this should be either 1 or 0, I don't know :)
-    uint8_t buff[4];
+    char buff[4];
     buff[0] = FIRMATA_START_SYSEX;
     buff[1] = FIRMATA_I2C_CONFIG;
-    buff[2] = delay & 0xFF, (delay >> 8) & 0xFF;
+    buff[2] = delay & 0xFF;
     buff[3] = FIRMATA_END_SYSEX;
     mraa_uart_write(firmata_dev->uart, buff, 4);
 
@@ -120,7 +121,7 @@ mraa_firmata_i2c_frequency(mraa_i2c_context dev, mraa_i2c_mode_t mode)
 static mraa_result_t
 mraa_firmata_send_i2c_read_req(mraa_i2c_context dev, int length)
 {
-    uint8_t* buffer = calloc(7, 0);
+    char* buffer = calloc(7, 0);
     if (buffer == NULL) {
         return MRAA_ERROR_NO_RESOURCES;
     }
@@ -149,7 +150,7 @@ mraa_firmata_send_i2c_read_req(mraa_i2c_context dev, int length)
 static mraa_result_t
 mraa_firmata_send_i2c_read_reg_req(mraa_i2c_context dev, uint8_t command, int length)
 {
-    uint8_t* buffer = calloc(9, 0);
+    char* buffer = calloc(9, 0);
     if (buffer == NULL) {
         return MRAA_ERROR_NO_RESOURCES;
     }
@@ -182,11 +183,17 @@ static mraa_result_t
 mraa_firmata_i2c_wait(int addr, int reg)
 {
     int i = 0;
-    for (i = 0; firmata_dev->i2cmsg[addr][reg] == -1; i++) {
-        if (i > 50) {
+    if (pthread_spin_lock(&firmata_dev->lock) != 0) return MRAA_ERROR_UNSPECIFIED;
+    int res = firmata_dev->i2cmsg[addr][reg];
+    if (pthread_spin_unlock(&firmata_dev->lock) != 0) return MRAA_ERROR_UNSPECIFIED;
+    for (; res == -1; i++) {
+        if (i > 1000) {
             return MRAA_ERROR_UNSPECIFIED;
         }
-        usleep(500);
+        usleep(50);
+        if (pthread_spin_lock(&firmata_dev->lock) != 0) return MRAA_ERROR_UNSPECIFIED;
+        res = firmata_dev->i2cmsg[addr][reg];
+        if (pthread_spin_unlock(&firmata_dev->lock) != 0) return MRAA_ERROR_UNSPECIFIED;
     }
     return MRAA_SUCCESS;
 }
@@ -210,7 +217,7 @@ mraa_firmata_i2c_read_word_data(mraa_i2c_context dev, uint8_t command)
             uint8_t rawdata[2];
             rawdata[0] = firmata_dev->i2cmsg[dev->addr][command];
             rawdata[1] = firmata_dev->i2cmsg[dev->addr][command+1];
-            uint16_t data = (uint16_t) rawdata;
+            uint16_t data = (uint16_t) *rawdata;
             uint8_t high = (data & 0xFF00) >> 8;
             data = (data << 8) & 0xFF00;
             data |= high;
@@ -224,9 +231,16 @@ mraa_firmata_i2c_read_word_data(mraa_i2c_context dev, uint8_t command)
 static int
 mraa_firmata_i2c_read_bytes_data(mraa_i2c_context dev, uint8_t command, uint8_t* data, int length)
 {
+    uint32_t *local_storage = (uint32_t*) calloc(length, sizeof(int));
     if (mraa_firmata_send_i2c_read_reg_req(dev, command, length) == MRAA_SUCCESS) {
         if (mraa_firmata_i2c_wait(dev->addr, command) == MRAA_SUCCESS) {
-            memcpy(data, &firmata_dev->i2cmsg[dev->addr][command], sizeof(int)*length);
+            memcpy(local_storage, &firmata_dev->i2cmsg[dev->addr][command], sizeof(int)*length);
+            int x = 0;
+            for(; x<length; x++){
+                data[x] = (uint8_t) local_storage[x];
+            }
+            free(local_storage);
+
             return length;
         }
     }
@@ -239,7 +253,7 @@ mraa_firmata_i2c_read(mraa_i2c_context dev, uint8_t* data, int length)
     if (mraa_firmata_send_i2c_read_req(dev, length) == MRAA_SUCCESS) {
         if (mraa_firmata_i2c_wait(dev->addr, 0) == MRAA_SUCCESS) {
             int i = 0;
-            for (i = 0; i < length; i++) {
+            for (; i < length; i++) {
                 data[i] = firmata_dev->i2cmsg[dev->addr][i];
             }
             return length;
@@ -266,7 +280,7 @@ mraa_firmata_i2c_write(mraa_i2c_context dev, const uint8_t* data, int bytesToWri
 {
     // buffer needs 5 bytes for firmata, and 2 bytes for every byte of data
     int buffer_size = (bytesToWrite*2) + 5;
-    uint8_t* buffer = calloc(buffer_size, 0);
+    char* buffer = calloc(buffer_size, 0);
     if (buffer == NULL) {
         return MRAA_ERROR_NO_RESOURCES;
     }
@@ -277,7 +291,7 @@ mraa_firmata_i2c_write(mraa_i2c_context dev, const uint8_t* data, int bytesToWri
     buffer[2] = dev->addr;
     buffer[3] = I2C_MODE_WRITE << 3;
     // we need to write until FIRMATA_END_SYSEX
-    for (i; i < (buffer_size-1); i++) {
+    for (; i < (buffer_size-1); i++) {
         buffer[ii] = data[i] & 0x7F;
         buffer[ii+1] = (data[i] >> 7) & 0x7f;
         ii = ii+2;
@@ -291,7 +305,7 @@ mraa_firmata_i2c_write(mraa_i2c_context dev, const uint8_t* data, int bytesToWri
 static mraa_result_t
 mraa_firmata_i2c_write_byte(mraa_i2c_context dev, uint8_t data)
 {
-    uint8_t* buffer = calloc(7, 0);
+    char* buffer = calloc(7, 0);
     if (buffer == NULL) {
         return MRAA_ERROR_NO_RESOURCES;
     }
@@ -310,7 +324,7 @@ mraa_firmata_i2c_write_byte(mraa_i2c_context dev, uint8_t data)
 static mraa_result_t
 mraa_firmata_i2c_write_byte_data(mraa_i2c_context dev, const uint8_t data, const uint8_t command)
 {
-    uint8_t* buffer = calloc(9, 0);
+    char* buffer = calloc(9, 0);
     if (buffer == NULL) {
         return MRAA_ERROR_NO_RESOURCES;
     }
@@ -345,7 +359,10 @@ mraa_firmata_aio_read(mraa_aio_context dev)
 {
     // careful, whilst you need to enable '0' for A0 you then need to read 14
     // in t_firmata because well that makes sense doesn't it...
-    return (int) firmata_dev->pins[dev->channel].value;
+    if (pthread_spin_lock(&firmata_dev->lock) != 0) return -1;
+    int ret = (int) firmata_dev->pins[dev->channel].value;
+    if (pthread_spin_unlock(&firmata_dev->lock) != 0) return -1;
+    return ret;
 }
 
 static mraa_result_t
@@ -380,7 +397,10 @@ mraa_firmata_gpio_mode_replace(mraa_gpio_context dev, mraa_gpio_mode_t mode)
 static int
 mraa_firmata_gpio_read_replace(mraa_gpio_context dev)
 {
-    return firmata_dev->pins[dev->pin].value;
+    if (pthread_spin_lock(&firmata_dev->lock) != 0) return -1;
+    int res = firmata_dev->pins[dev->pin].value;
+    if (pthread_spin_unlock(&firmata_dev->lock) != 0) return -1;
+    return res;
 }
 
 static mraa_result_t
@@ -500,6 +520,14 @@ mraa_firmata_pwm_enable_replace(mraa_pwm_context dev, int enable)
     return MRAA_SUCCESS;
 }
 
+static mraa_result_t
+mraa_firmata_pwm_period_replace(mraa_pwm_context dev, int period)
+{
+    syslog(LOG_WARNING, "You cannot set period of a PWM pin with Firmata\n");
+
+    return MRAA_ERROR_FEATURE_NOT_IMPLEMENTED;
+}
+
 static void*
 mraa_firmata_pull_handler(void* vp)
 {
@@ -517,6 +545,8 @@ mraa_firmata_pull_handler(void* vp)
         isr_prev = isr_now;
         usleep(100);
     }
+
+    return NULL;
 }
 
 mraa_board_t*
@@ -661,6 +691,7 @@ mraa_firmata_plat_init(const char* uart_dev)
     b->adv_func->pwm_write_replace = &mraa_firmata_pwm_write_replace;
     b->adv_func->pwm_read_replace = &mraa_firmata_pwm_read_replace;
     b->adv_func->pwm_enable_replace = &mraa_firmata_pwm_enable_replace;
+    b->adv_func->pwm_period_replace = &mraa_firmata_pwm_period_replace;
 
     b->adv_func->i2c_init_bus_replace = &mraa_firmata_i2c_init_bus_replace;
     b->adv_func->i2c_set_frequency_replace = &mraa_firmata_i2c_frequency;

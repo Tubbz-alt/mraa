@@ -1,7 +1,7 @@
 /*
  * Author: Brendan Le Foll <brendan.le.foll@intel.com>
  * Author: Longwei Su <lsu@ics.com>
- * Copyright (c) 2015 Intel Corporation.
+ * Copyright (c) 2015-2016 Intel Corporation.
  *
  * Permission is hereby granted, free of charge, to any person obtaining
  * a copy of this software and associated documentation files (the
@@ -29,13 +29,12 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include <unistd.h>
-#include <json-c/json.h>
-#include <libudev.h>
+#include <error.h>
+#include <sys/types.h>
 
-#include <mraa/uart.h>
-#include <mraa/gpio.h>
-#include <mraa/i2c.h>
-#include <mraa/pwm.h>
+#include <json-c/json.h>
+
+#include <argp.h>
 
 #include <mraa_internal.h>
 
@@ -311,113 +310,14 @@ imraa_handle_subplatform(struct json_object* jobj, bool force_update)
         }
     }
 }
+#include <imraa_arduino.h>
+#include <imraa_io.h>
+#include <imraa_lock.h>
 
-void
-imraa_handle_IO(struct json_object* jobj)
-{
-    struct mraa_io_objects_t* mraa_io_obj;
-    struct json_object* ioarray;
-    int ionum = 0;
-    int i;
-    if (json_object_object_get_ex(jobj, "IO", &ioarray) == true) {
-        ionum = json_object_array_length(ioarray);
-        printf("Length of IO array is %d\n", ionum);
-        mraa_io_obj = (mraa_io_objects_t*) malloc(ionum * sizeof(mraa_io_objects_t));
-        if (!mraa_io_obj) {
-            printf("imraa_handle_IO malloc failed\n");
-            exit(1);
-        }
-        int index2 = -1;
-        ; // optional index for io configuration;
-        if (json_object_is_type(ioarray, json_type_array)) {
-            for (i = 0; i < ionum; i++) {
-                struct json_object* ioobj = json_object_array_get_idx(ioarray, i);
-                struct json_object* x;
-                if (json_object_object_get_ex(ioobj, "type", &x) == true) {
-                    mraa_io_obj[i].type = json_object_get_string(x);
-                }
-                if (json_object_object_get_ex(ioobj, "index", &x) == true) {
-                    mraa_io_obj[i].index = json_object_get_int(x);
-                }
-                if (json_object_object_get_ex(ioobj, "raw", &x) == true) {
-                    mraa_io_obj[i].raw = json_object_get_boolean(x);
-                }
-                if (json_object_object_get_ex(ioobj, "label", &x) == true) {
-                    mraa_io_obj[i].label = json_object_get_string(x);
-                }
-                if (json_object_object_get_ex(ioobj, "index2", &x) == true) {
-                    index2 = json_object_get_int(x);
-                }
-                // starting io configuration
-                if (strcmp(mraa_io_obj[i].type, "gpio") == 0) {
-                    mraa_gpio_context gpio = NULL;
-                    if (mraa_io_obj[i].raw) {
-                        gpio = mraa_gpio_init_raw(mraa_io_obj[i].index);
-                    } else {
-                        gpio = mraa_gpio_init(mraa_io_obj[i].index);
-                    }
-                    if (gpio != NULL) {
-                        mraa_result_t r = mraa_gpio_owner(gpio, 0);
-                        if (r != MRAA_SUCCESS) {
-                            mraa_result_print(r);
-                        }
-                        mraa_gpio_close(gpio);
-                    }
-                } else if (strcmp(mraa_io_obj[i].type, "i2c") == 0) {
-                    mraa_i2c_context i2c = NULL;
-                    if (mraa_io_obj[i].raw) {
-                        i2c = mraa_i2c_init_raw(mraa_io_obj[i].index);
-                    } else {
-                        i2c = mraa_i2c_init(mraa_io_obj[i].index);
-                    }
-                    if (i2c != NULL) {
-                        mraa_i2c_stop(i2c);
-                    }
-                } else if (strcmp(mraa_io_obj[i].type, "pwm") == 0) {
-                    mraa_pwm_context pwm = NULL;
-                    if (mraa_io_obj[i].raw) {
-                        pwm = mraa_pwm_init_raw(index2, mraa_io_obj[i].index);
-                    } else {
-                        pwm = mraa_pwm_init(mraa_io_obj[i].index);
-                    }
-                    if (pwm != NULL) {
-                        mraa_result_t r = mraa_pwm_owner(pwm, 0);
-                        if (r != MRAA_SUCCESS) {
-                            mraa_result_print(r);
-                        }
-                        mraa_pwm_close(pwm);
-                    }
-                } else if (strcmp(mraa_io_obj[i].type, "spi") == 0) {
-                    mraa_spi_context spi = NULL;
-                    if (mraa_io_obj[i].raw) {
-                        spi = mraa_spi_init_raw(mraa_io_obj[i].index, index2);
-                    } else {
-                        spi = mraa_spi_init(mraa_io_obj[i].index);
-                    }
-                    if (spi != NULL) {
-                        mraa_spi_stop(spi);
-                    }
-                } else if (strcmp(mraa_io_obj[i].type, "uart") == 0) {
-                    mraa_uart_context uart = NULL;
-                    if (mraa_io_obj[i].raw) {
-                        uart = mraa_uart_init_raw(mraa_io_obj[i].label);
-                    } else {
-                        uart = mraa_uart_init(mraa_io_obj[i].index);
-                    }
-                    if (uart != NULL) {
-                        mraa_uart_stop(uart);
-                    }
-                }
-            }
-        } else {
-            fprintf(stderr, "IO array incorrectly parsed\n");
-        }
-        free(mraa_io_obj);
-    }
-}
+#define IMRAA_CONF_FILE "/etc/imraa.conf"
 
 int
-check_version(struct json_object* jobj)
+imraa_check_version(struct json_object* jobj)
 {
     struct json_object* imraa_version;
     if (json_object_object_get_ex(jobj, "version", &imraa_version) == true) {
@@ -434,58 +334,82 @@ check_version(struct json_object* jobj)
     return 0;
 }
 
-void
-print_version()
+const char *argp_program_version = "imraa version 2.0";
+const char *argp_program_bug_address = "http://github.com/intel-iot-devkit/mraa/issues";
+
+static char doc[] = "somestuff";
+
+static char args_doc[] = "-i imraa.conf";
+
+static struct argp_option options[] = {
+    {"verbose",  'v', 0,      0,  "Produce verbose output" },
+    {"quiet",    'q', 0,      0,  "Don't produce any output" },
+    {"silent",   's', 0,      OPTION_ALIAS },
+    {"force",    'f', 0,      0,  "Force update" },
+    {"arduino",  'a', 0,      0,  "Arduino detection" },
+    {"input",    'i', "FILE", 0,
+     "configuration file" },
+    { 0 }
+};
+
+struct arguments
 {
-    fprintf(stdout, "Version %s on %s\n", mraa_get_version(), mraa_get_platform_name());
+    char *args[2];
+    int silent, verbose, force, arduino;
+    char *input_file;
+};
+
+static error_t
+parse_opt(int key, char *arg, struct argp_state *state)
+{
+
+    /* Get the input argument from argp_parse, which we
+     know is a pointer to our arguments structure. */
+    struct arguments *arguments = state->input;
+
+    switch(key) {
+        case 'q': case 's':
+            arguments->silent = 1;
+            break;
+        case 'v':
+            arguments->verbose = 1;
+            break;
+        case 'a':
+            arguments->arduino = 1;
+            break;
+        case 'f':
+            arguments->force = 1;
+            break;
+        case 'i':
+            arguments->input_file = arg;
+            break;
+        case ARGP_KEY_ARG:
+            break;
+        case ARGP_KEY_END:
+            break;
+        default:
+            return ARGP_ERR_UNKNOWN;
+    }
+    return 0;
 }
 
-void
-print_help()
-{
-    fprintf(stdout, "version           Get mraa version and board name\n");
-    fprintf(stdout, "force             Force update subplatform\n");
-    fprintf(stdout, "conf_path         Force update with override configuration\n");
-}
-
-void
-print_command_error()
-{
-    fprintf(stdout, "Invalid command, options are:\n");
-    print_help();
-    exit(EXIT_FAILURE);
-}
+static struct argp argp = { options, parse_opt, args_doc, doc};
 
 int
 main(int argc, char** argv)
 {
     char* buffer = NULL;
-    char* imraa_conf_file = IMRAA_CONF_FILE;
     long fsize;
-    bool force_update = false;
-    int i = 0;
-    uint32_t ionum = 0;
+    struct arguments arguments;
 
-    if (argc > 2) {
-        print_command_error();
-    }
+    arguments.silent = 0;
+    arguments.verbose = 0;
+    arguments.force = 0;
+    arguments.input_file = IMRAA_CONF_FILE;
 
-    if (argc > 1) {
-        if (strcmp(argv[1], "help") == 0) {
-            print_help();
-            return EXIT_SUCCESS;
-        } else if (strcmp(argv[1], "version") == 0) {
-            print_version();
-            return EXIT_SUCCESS;
-        } else if (strcmp(argv[1], "force") == 0) {
-            force_update = true;
-        } else {
-            imraa_conf_file = argv[1];
-            force_update = true;
-        }
-    }
+    argp_parse(&argp, argc, argv, 0, 0, &arguments);
 
-    FILE* fh = fopen(imraa_conf_file, "r");
+    FILE* fh = fopen(arguments.input_file, "r");
     if (fh == NULL) {
         fprintf(stderr, "Failed to open configuration file\n");
         return EXIT_FAILURE;
@@ -497,28 +421,33 @@ main(int argc, char** argv)
     buffer = calloc(fsize, sizeof(char));
     if (buffer != NULL) {
         int result = fread(buffer, sizeof(char), fsize, fh);
-        if (result != fsize) {
-            printf("imraa conf reading error");
+        if (result != (fsize - 1)) {
+            printf("imraa conf reading error\n");
         }
     } else {
         printf("imraa read_conf buffer can't be allocated\n");
         exit(1);
     }
 
+    // call reduced imraa_init (not that mraa_init) will already have been called
     imraa_init();
 
     json_object* jobj = json_tokener_parse(buffer);
-    if (check_version(jobj) != 0) {
+    if (imraa_check_version(jobj) != 0) {
         printf("version of configuration file is not compatible, please check again\n");
     } else {
         mraa_platform_t type = mraa_get_platform_type();
-        imraa_handle_subplatform(jobj, force_update);
+
+        if (arguments.arduino) {
+            imraa_handle_subplatform(jobj, arguments.force);
+        }
+
         if (type == MRAA_NULL_PLATFORM || type == MRAA_UNKNOWN_PLATFORM) {
             printf("imraa: Failed to do IO pinmuxing on null/unknown platform\n");
         } else {
             imraa_handle_IO(jobj);
-        }
     }
+
     fclose(fh);
     json_object_put(jobj);
     free(buffer);

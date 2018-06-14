@@ -30,7 +30,7 @@ extern "C" {
 
 #include "mraa_internal.h"
 
-#define MRAA_MOCK_PINCOUNT 8
+#define MRAA_MOCK_PINCOUNT 10
 
 mraa_board_t*
 mraa_mock_board();
